@@ -17,14 +17,14 @@ import java.io.*;
 import java.net.*; 
 
 
-public class VirtualMoneyAccount implements MoneyAccountInterface{
+public class VirtualMoneyAccount implements AccountInterface{
   
   
   AccountInterface stub1;
   AccountInterface stub2;
   AccountInterface stub3;
   
-  static boolean snapshotCompleted = false;
+  static boolean shapshotCompleted = false;
   
   private boolean isLeader; //so that each account knows whether it is the leader or not
   private boolean snapshotInitiated;
@@ -36,11 +36,16 @@ public class VirtualMoneyAccount implements MoneyAccountInterface{
   private AccountInterface[] stubArray;
   
   
-  public VirtualMoneyAccount(String[] otherIPs) {
+ // public VirtualMoneyAccount(String[] otherIPs) {
+    public VirtualMoneyAccount() {
     snapshotInitiated = false;
-    balance = 200;    
-    ipAddress = InetAddress.getLocalHost().getHostAddress();
-    processId = generateProcessId;
+    balance = 200;
+    try{
+      ipAddress = InetAddress.getLocalHost().getHostAddress();
+    }catch (Exception e){
+      System.err.print(e);
+    }
+    processId = generateProcessId();
     isLeader = false; //start with no process the leader
     
     
@@ -66,13 +71,13 @@ public class VirtualMoneyAccount implements MoneyAccountInterface{
       
       //process has to lookup the other three processes in the registry
       Registry regA = LocateRegistry.getRegistry(otherIPs[0]);
-      stubA = (AccountInterface) regA.lookup("Account");
+      AccountInterface stubA = (AccountInterface) regA.lookup("Account");
       
       Registry regB = LocateRegistry.getRegistry(otherIPs[1]);
-      stubB = (AccountInterface) regB.lookup("Account");
+      AccountInterface stubB = (AccountInterface) regB.lookup("Account");
       
       Registry regC = LocateRegistry.getRegistry(otherIPs[2]);
-      stubC = (AccountInterface) regC.lookup("Account");
+      AccountInterface stubC = (AccountInterface) regC.lookup("Account");
       
       AccountInterface[] stubArray = {stubA, stubB, stubC};
       
@@ -82,19 +87,19 @@ public class VirtualMoneyAccount implements MoneyAccountInterface{
       // SEMAPHORES HERE TO MAKE SURE ACCOUNT TRANSACTIONS DON'T OCCUR UNTIL EVERYONE IS ON SAME PAGE ABOUT LEADER
       
       
-
+      
       //transactions loop
       Boolean snapshotInitiated = false;
-      Boolean snapshotDone = false;
+      Boolean shapshotCompleted = false;
       int r = (int)(Math.random()*45000)+5000;
       int m = (int)(Math.random()*this.getBalance()-1)+1;
       int p = (int)(Math.random()*3); //randomly picks one of the other accts for a transaction
       
-      while (shapShotDone == false){
+      while (shapshotCompleted == false){
         
         //if leader, initiate snapshot if haven't yet initiated
         if(this.isLeader && !snapshotInitiated){
-          initiateSnapshot();
+          //initiateSnapshot();
         }
         
         
@@ -117,26 +122,59 @@ public class VirtualMoneyAccount implements MoneyAccountInterface{
   
   
   private void electLeader(){
- 
-          Boolean leaderDecided = false;
-      while (leaderDecided == false){
-        
-      }
+    
+    Boolean leaderDecided = false;
+    while (leaderDecided == false){
+      
+    }
   }
   
-  private void generateProcessID(){}
-  private void setIsLeader(){}
-  private int getBalance(){}
-  private void withdraw(){}
+  private int generateProcessId(){
+    int sum = 0;
+    try{
+      //String raw_ip = InetAddress.getLocalHost().getHostAddress();
+      String raw_ip = this.ipAddress; 
+      //System.out.println(raw_ip);
+      String parsed_ip = raw_ip.replaceAll("[.]","");
+      //System.out.println(parsed_ip);
+      char[] ip_chars = parsed_ip.toCharArray();
+      for (char digit: ip_chars){
+        sum+= Character.getNumericValue(digit);
+      }
+      System.out.println(sum);
+    }catch(Exception e){
+      System.err.print(e);
+    }
+    
+    return sum;
+    
+  }
+  
+  private void setIsLeader(boolean status){
+    this.isLeader = status;
+    return;
+  }
+  
+  private int getBalance(){
+    return this.balance;
+  }
+  
+  private void withdraw(int amt){
+    this.balance = this.balance - amt;
+    return;
+  }
   //something void initiateSnapshot(){}
-  public void deposit(int){}
+  public void deposit(int amt){
+    this.balance = this.balance + amt;
+    return;
+  }
   
   
   
   
   
   public static void main(String[] args) {
-     
+
     VirtualMoneyAccount account = new VirtualMoneyAccount();
     
     try {
