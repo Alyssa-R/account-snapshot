@@ -12,6 +12,7 @@ import java.rmi.registry.*;
 
 import java.util.*;
 import java.util.concurrent.TimeUnit;
+import java.util.Hashtable;
 
 import java.io.*;  
 import java.net.*; 
@@ -20,24 +21,38 @@ import java.net.*;
 public class VirtualMoneyAccount implements AccountInterface{
   
   
-  AccountInterface stub1;
-  AccountInterface stub2;
-  AccountInterface stub3;
+  AccountInterface stubA;
+  AccountInterface stubB;
+  AccountInterface stubC;
+  private Hashtable<Integer, AccountInterface> stubs;
   
-  static boolean shapshotCompleted = false;
+  private Hashtable<Integer, Integer> channels;
+  
+  private String channelsAsString;
+  
+  private boolean snapshotCompleted;
+  private boolean snapshotInitiated;
+  private boolean firstTimeReceivingMarker; 
+  private Hashtable<Integer, Integer> processesStates;
+  
+  private String processesChannelStates;
+  private Hashtable<Integer, Integer> snapshotStatus;
   
   private boolean isLeader; //so that each account knows whether it is the leader or not
-  private boolean snapshotInitiated;
+  private int leaderID;
+  private AccountInterface leader;
+  private boolean leaderDecided;
   
   private int balance;
-  private int processId;
+  private int processID;
   private String ipAddress;
   
+  //change to hashtable so that we have processIDs (keys) associated with stubs (values)
   private AccountInterface[] stubArray;
   
   
- // public VirtualMoneyAccount(String[] otherIPs) {
-    public VirtualMoneyAccount() {
+  // public VirtualMoneyAccount(String[] otherIPs) {
+  public VirtualMoneyAccount() {
     snapshotInitiated = false;
     balance = 200;
     try{
@@ -45,11 +60,19 @@ public class VirtualMoneyAccount implements AccountInterface{
     }catch (Exception e){
       System.err.print(e);
     }
-    processId = generateProcessId();
+    processID = generateProcessID();
     isLeader = false; //start with no process the leader
     
     
-    AccountInterface[] stubArray = new AccountInterface[3];
+    stubs = new Hashtable();
+    channels = new Hashtable();
+    processesStates = new Hashtable();
+    processesChannelStates = "";
+    snapshotStatus = new Hashtable();
+    
+    snapshotInitiated = false;
+    snapshotCompleted = false;
+    firstTimeReceivingMarker = true;
     
   }
   
@@ -69,49 +92,74 @@ public class VirtualMoneyAccount implements AccountInterface{
       Registry reg = LocateRegistry.getRegistry();
       reg.bind("Account", skeleton); 
       
-      //process has to lookup the other three processes in the registry
-      Registry regA = LocateRegistry.getRegistry(otherIPs[0]);
-      AccountInterface stubA = (AccountInterface) regA.lookup("Account");
       
-      Registry regB = LocateRegistry.getRegistry(otherIPs[1]);
-      AccountInterface stubB = (AccountInterface) regB.lookup("Account");
-      
-      Registry regC = LocateRegistry.getRegistry(otherIPs[2]);
-      AccountInterface stubC = (AccountInterface) regC.lookup("Account");
-      
-      AccountInterface[] stubArray = {stubA, stubB, stubC};
+      boolean connected = false;
+      System.out.println("I'm here!");
+      while (!connected){
+        try {
+          //process has to lookup the other three processes in the registry
+          Registry regA = LocateRegistry.getRegistry(otherIPs[0]);
+          stubA = (AccountInterface) regA.lookup("Account");
+          
+          System.out.println("I'm here!");
+            
+          Registry regB = LocateRegistry.getRegistry(otherIPs[1]);
+          stubB = (AccountInterface) regB.lookup("Account");
+          
+          Registry regC = LocateRegistry.getRegistry(otherIPs[2]);
+          stubC = (AccountInterface) regC.lookup("Account");
+          
+          AccountInterface[] stubArray = {stubA, stubB, stubC};
+          
+          connected = true;
+        }
+        catch (NotBoundException e) {
+          System.out.println("Not bound exception: " + e.toString());
+          e.printStackTrace();
+        }
+      }
+      System.out.println("I'm here!");
+      //populate hashtable
+      stubs.put(stubA.getProcessID(), stubA);
+      stubs.put(stubB.getProcessID(), stubB);
+      stubs.put(stubC.getProcessID(), stubC);
       
       
       //leader election
       electLeader();      
-      // SEMAPHORES HERE TO MAKE SURE ACCOUNT TRANSACTIONS DON'T OCCUR UNTIL EVERYONE IS ON SAME PAGE ABOUT LEADER
-      
-      
       
       //transactions loop
-      Boolean snapshotInitiated = false;
-      Boolean shapshotCompleted = false;
       int r = (int)(Math.random()*45000)+5000;
       int m = (int)(Math.random()*this.getBalance()-1)+1;
       int p = (int)(Math.random()*3); //randomly picks one of the other accts for a transaction
       
-      while (shapshotCompleted == false){
-        
-        //if leader, initiate snapshot if haven't yet initiated
-        if(this.isLeader && !snapshotInitiated){
-          //initiateSnapshot();
-        }
-        
+      while (snapshotCompleted == false){
         
         TimeUnit.MILLISECONDS.sleep(r); //wait random time
-        stubArray[p].deposit(m); //transfer random money to random other acct
-        this.withdraw(m);
+        stubArray[p].deposit(m, this.getProcessID()); //transfer random money to random other acct
+        this.withdraw(m); //deduct from balance
         
         r = (int)(Math.random()*45000)+5000;
         m = (int)(Math.random()*this.getBalance()-1)+1;
         p = (int)(Math.random()*3);
         
-      }    
+        //if leader, initiate snapshot if haven't yet initiated
+        if(this.isLeader && !snapshotInitiated){
+          initiateSnapshot();
+          snapshotInitiated = true;
+        }
+        if(this.isLeader){
+          
+          if (snapshotStatus.get(this.getProcessID())==4 && snapshotStatus.get(stubA.getProcessID())==4 && snapshotStatus.get(stubB.getProcessID())==4 && snapshotStatus.get(stubC.getProcessID())==4){
+            snapshotCompleted = true;
+          }
+        }
+      }
+      
+      //after loop, snapshot has been completed
+      if (isLeader){
+        recordSnapshotResult();
+      }
       
     } catch (Exception e) {
       System.out.println("Account exception: " + e.toString());
@@ -121,15 +169,171 @@ public class VirtualMoneyAccount implements AccountInterface{
   }
   
   
+//LEADER ELECTION CODE
+//----------------------------------------------------------------------------
   private void electLeader(){
-    
+    leaderID = getProcessID();
     Boolean leaderDecided = false;
-    while (leaderDecided == false){
-      
+    int lastSentID = getProcessID();
+    
+    
+    while (!leaderDecided){
+      try{
+        if (isLeader){
+        stubA.sendLeaderConfirmation(getProcessID());
+      }
+      stubA.passLeaderID(leaderID);
+    
+    
+    //waits for leader to receive confirmation of election back from ring before returning from leader election method
+    stubA.sendLeaderConfirmation(leaderID);
+    if (!isLeader){
+      while (!stubs.get(leaderID).isLeaderDecided()){
+      }
+    }
+      }
+      catch (RemoteException e){}
+     }
+  }
+  
+  public void passLeaderID(int value) throws RemoteException {
+    if (value>leaderID && !leaderDecided){
+      setLeaderID(value);
+    }
+    else if (value == getProcessID()){
+      isLeader = true;
     }
   }
   
-  private int generateProcessId(){
+  public void sendLeaderConfirmation(int leaderPID){
+
+      setLeaderID(leaderPID);
+    setLeaderDecided();
+
+  }
+  
+  public int getProcessID(){
+    return processID; 
+  }
+  
+  public void setLeaderID(int value){
+    leaderID = value;
+    return;
+  }
+  
+  public void setLeader(){
+    leader = stubs.get(leaderID);
+  }
+  
+  public int getLeaderID(){
+    return leaderID;
+  }
+  
+  public boolean isLeaderDecided(){
+    return leaderDecided;
+  }
+  
+  public void setLeaderDecided(){
+   this.leaderDecided = true; 
+  }
+  
+  //-----------------------------------------------------------------------------
+  
+  
+//SNAPSHOT CODE
+//----------------------------------------------------------------------------
+  public void initiateSnapshot(){
+    saveBalance(getProcessID(), getBalance());
+    updateSnapshotStatus(getProcessID());
+    
+    try {
+    stubA.recordStates(this.getProcessID());
+    stubB.recordStates(this.getProcessID());
+    stubC.recordStates(this.getProcessID());
+    } catch (RemoteException e){}
+    
+  }
+  
+//called on recipient of snapshot marker
+  public void recordStates(int callingPID) throws RemoteException{
+    if (firstTimeReceivingMarker){
+      //-save balance by calling record method on leader -- leader.saveBalance(this.processID, this.balance)
+      leader.saveBalance(callingPID, this.getBalance());
+      leader.updateSnapshotStatus(callingPID);
+      
+      //-send own markers out to all other processes (basically call this method on other processes)
+      stubA.recordStates(this.getProcessID());
+      stubB.recordStates(this.getProcessID());
+      stubC.recordStates(this.getProcessID());
+      
+      //-save channel from initPID to this proccess as empty -- leader.saveChannel(from, to, "");
+      leader.saveChannel(callingPID, this.getProcessID(), 0);
+      leader.updateSnapshotStatus(callingPID);
+      
+      //-begin recording all other channels into this process
+      channels.clear(); 
+    }
+    else if (isLeader){
+      int channel = channels.get(callingPID);
+      saveChannel(callingPID, this.getProcessID(), channel);
+      updateSnapshotStatus(callingPID);
+    }
+    else {
+      //stop recording channel from initPID to this process
+      int channel = channels.get(callingPID);
+      //leader.saveChannel(initPID, this.PID, ChannelString);
+      leader.saveChannel(callingPID, this.getProcessID(), channel);
+      leader.updateSnapshotStatus(callingPID);
+    }
+  }
+  
+  
+  public void saveBalance(int callingPID, int callingBalance){
+    processesStates.put(callingPID, callingBalance);
+  }
+  
+  public void saveChannel(int channelFrom, int channelTo, int channelValue){
+    channelsAsString+="Channel from process ID " + channelFrom + " to process ID " + channelTo + ": $" + channelValue + "/n";
+    try {leader.addChannelState(this.channelsAsString);} catch (RemoteException e){}
+    
+  }
+  
+  public void addChannelState(String channelInfo){
+    processesChannelStates+=channelInfo;
+  }
+  
+  public void updateSnapshotStatus(int pID){
+    if (this.snapshotStatus.contains(pID)){
+      int currentStatus = this.snapshotStatus.get(pID);
+      this.snapshotStatus.put(pID, currentStatus++);
+    }
+        else {
+          this.snapshotStatus.put(pID, 1);
+        }
+        
+        }
+  
+  public void recordSnapshotResult(){
+    try{
+    System.out.println(getProcessID() + " state: " + processesStates.get(getProcessID()));
+    
+    int aIP = stubA.getProcessID();
+    System.out.println(aIP + " state: " + processesStates.get(aIP));
+    
+    int bIP = stubB.getProcessID();
+    System.out.println(bIP + " state: " + processesStates.get(bIP));
+    
+    int cIP = stubC.getProcessID();
+    System.out.println(cIP + " state: " + processesStates.get(cIP));
+  
+    } catch (RemoteException e){}
+  }
+  
+ 
+  
+//----------------------------------------------------------------------------
+  
+  private int generateProcessID(){
     int sum = 0;
     try{
       //String raw_ip = InetAddress.getLocalHost().getHostAddress();
@@ -163,18 +367,23 @@ public class VirtualMoneyAccount implements AccountInterface{
     this.balance = this.balance - amt;
     return;
   }
-  //something void initiateSnapshot(){}
-  public void deposit(int amt){
+  
+  public void deposit(int amt, int callingPID){
     this.balance = this.balance + amt;
-    return;
-  }
-  
-  
+    if (this.channels.contains(callingPID)){
+      int channelPrev = this.channels.get(callingPID);
+      this.channels.put(callingPID, channelPrev + amt);                                          
+    }
+        else {
+          this.channels.put(callingPID, amt);
+        }
+        return;      
+        }
   
   
   
   public static void main(String[] args) {
-
+    
     VirtualMoneyAccount account = new VirtualMoneyAccount();
     
     try {
@@ -184,4 +393,4 @@ public class VirtualMoneyAccount implements AccountInterface{
       e.printStackTrace();
     }
   }
-}
+  }
